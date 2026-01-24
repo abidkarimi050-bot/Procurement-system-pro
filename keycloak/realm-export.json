@@ -1,0 +1,177 @@
+{
+  "realm": "procurement",
+  "enabled": true,
+  "displayName": "Procurement System",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "bruteForceProtected": true,
+  
+  "roles": {
+    "realm": [
+      {
+        "name": "REQUESTER",
+        "description": "Can create purchase requests"
+      },
+      {
+        "name": "MANAGER",
+        "description": "Can approve requests within limit"
+      },
+      {
+        "name": "DEPT_HEAD",
+        "description": "Can approve higher amount requests"
+      },
+      {
+        "name": "FINANCE",
+        "description": "Final approval, budget management, payments"
+      },
+      {
+        "name": "VENDOR",
+        "description": "External vendor - can submit quotations"
+      },
+      {
+        "name": "AUDITOR",
+        "description": "Read-only access, reporting"
+      },
+      {
+        "name": "ADMIN",
+        "description": "System administration"
+      }
+    ]
+  },
+  
+  "clients": [
+    {
+      "clientId": "procurement-frontend",
+      "name": "Procurement Frontend SPA",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://localhost:4200/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://localhost:4200"
+      ],
+      "defaultClientScopes": ["openid", "profile", "email", "roles"]
+    },
+    {
+      "clientId": "user-service",
+      "name": "User Service",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "user-service-secret"
+    },
+    {
+      "clientId": "budget-service",
+      "name": "Budget Service",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "budget-service-secret"
+    },
+    {
+      "clientId": "requisition-service",
+      "name": "Requisition Service",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "requisition-service-secret"
+    },
+    {
+      "clientId": "vendor-service",
+      "name": "Vendor Service",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "vendor-service-secret"
+    },
+    {
+      "clientId": "order-payment-service",
+      "name": "Order & Payment Service",
+      "enabled": true,
+      "bearerOnly": true,
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "order-payment-service-secret"
+    }
+  ],
+  
+  "users": [
+    {
+      "username": "admin",
+      "email": "admin@procurement.local",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "System",
+      "lastName": "Admin",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "admin123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["ADMIN", "FINANCE"]
+    },
+    {
+      "username": "finance.user",
+      "email": "finance@procurement.local",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Finance",
+      "lastName": "User",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "finance123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["FINANCE"]
+    },
+    {
+      "username": "manager.user",
+      "email": "manager@procurement.local",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Department",
+      "lastName": "Manager",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "manager123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["MANAGER"]
+    },
+    {
+      "username": "requester.user",
+      "email": "requester@procurement.local",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Regular",
+      "lastName": "Requester",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "requester123",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["REQUESTER"]
+    }
+  ]
+}
