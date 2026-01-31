@@ -10,7 +10,7 @@ This document outlines the microservice architecture for a **Procurement System*
 
 ### 1.1 Service Decomposition (Simplified)
 
-Based on the business requirements, we identify **5 core microservices** (consolidated for simplicity):
+Based on the business requirements, we identify **6 core microservices** (consolidated for simplicity):
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -35,11 +35,21 @@ Based on the business requirements, we identify **5 core microservices** (consol
 │  │ • Vendor management                │  │ • Purchase orders              ││
 │  │ • RFQ / Quotations                 │  │ • Goods receipt                ││
 │  │ • Vendor comparison                │  │ • Invoice & 3-way matching     ││
-│  │ • Notifications (embedded)        │  │ • Payment processing           ││
+│  │ • Vendor portal API                │  │ • Payment processing           ││
+│  └────────────────────────────────────┘  └────────────────────────────────┘│
+│                                                                              │
+│  ┌────────────────────────────────────┐  ┌────────────────────────────────┐│
+│  │      NOTIFICATION WORKER           │  │      FILE STORAGE              ││
+│  │           (NestJS)                 │  │      (MinIO/S3)                ││
+│  │                                    │  │                                ││
+│  │ • Kafka consumer                   │  │ • Request attachments          ││
+│  │ • Email templates                  │  │ • Invoice PDFs                 ││
+│  │ • SMTP sending                     │  │ • Quotation documents          ││
+│  │ • Delivery tracking                │  │ • Signed PO files              ││
 │  └────────────────────────────────────┘  └────────────────────────────────┘│
 │                                                                              │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
-│  │                    SHARED: AUDIT & NOTIFICATION                       │  │
+│  │                          SHARED: AUDIT                                │  │
 │  │         (Event-driven via Kafka → All services publish events)        │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                              │
@@ -53,12 +63,13 @@ Based on the business requirements, we identify **5 core microservices** (consol
 | **User Service** | NestJS | User profiles, departments, org hierarchy, role assignments, user preferences |
 | **Budget Service** | Spring Boot | Department budgets, allocation, reservation, top-up requests, balance tracking |
 | **Requisition Service** | Spring Boot | Purchase requests + approval workflow (merged), multi-level approval routing |
-| **Vendor Service** | NestJS | Vendor CRUD, RFQ management, quotation collection, vendor scoring, notifications |
+| **Vendor Service** | NestJS | Vendor CRUD, RFQ management, quotation collection, vendor scoring, vendor portal API |
 | **Order & Payment Service** | Spring Boot | PO generation, goods receipt, invoice matching, payment processing |
+| **Notification Worker** | NestJS | Kafka consumer, email sending via SMTP, notification templates, delivery tracking |
 
-**Cross-Cutting Concerns (Not Separate Services):**
-- **Notifications**: Embedded in each service OR simple event → email gateway
-- **Audit**: All services publish events to Kafka → Elasticsearch (no dedicated service needed)
+**Infrastructure Services:**
+- **File Storage**: MinIO (local) / AWS S3 (prod) - Attachments, PDFs, documents
+- **Audit**: All services publish events to Kafka → Elasticsearch (event-driven)
 
 **Why This Simplification?**
 - Fewer services = easier to develop, test, deploy, and maintain
@@ -482,7 +493,7 @@ Based on the business requirements, we identify **5 core microservices** (consol
 │   │   docker-compose.yml                                                │   │
 │   │   ├── PostgreSQL (shared for local)                                 │   │
 │   │   ├── Redis                                                         │   │
-│   │   ├── Kafka (or RabbitMQ)                                           │   │
+│   │   ├── Kafka                                                         │   │
 │   │   ├── Keycloak                                                      │   │
 │   │   ├── Vault (dev mode)                                              │   │
 │   │   └── Mailhog (email testing)                                       │   │
@@ -738,23 +749,517 @@ kubectl logs -f deployment/budget-service -n procurement-dev
 
 ---
 
-## 14. Key Design Decisions
+## 14. Vendor Portal Architecture
+
+### 14.1 Vendor Access Options
+
+The system provides multiple ways for vendors to interact:
+
+**OPTION 1: Dedicated Vendor Portal (Recommended)**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         VENDOR PORTAL (React SPA)                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   PUBLIC ACCESS (No Login Required):                                         │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │ • View RFQ details via magic link (email)                            │  │
+│   │ • Download RFQ documents                                             │  │
+│   │ • Submit quotation (one-time token-based)                            │  │
+│   │ • Upload supporting documents                                        │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   AUTHENTICATED VENDOR ACCESS (Keycloak Login):                             │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │ • View all RFQs sent to vendor                                       │  │
+│   │ • Manage quotation submissions                                       │  │
+│   │ • Track quotation status (pending/accepted/rejected)                 │  │
+│   │ • View purchase orders                                               │  │
+│   │ • Submit invoices with attachments                                   │  │
+│   │ • Track payment status                                               │  │
+│   │ • Update vendor profile & bank details                               │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   TECHNICAL ARCHITECTURE:                                                    │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                                                                      │  │
+│   │   Frontend: React + TypeScript                                       │  │
+│   │   Auth: Keycloak (vendor realm)                                      │  │
+│   │   API: Vendor Service (public + authenticated endpoints)             │  │
+│   │   File Upload: Direct to MinIO/S3 with presigned URLs                │  │
+│   │   Hosting: Nginx static + CDN                                        │  │
+│   │                                                                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**OPTION 2: Email-Based Workflow (Simpler)**
+
+```
+1. System sends RFQ email with unique link
+2. Vendor clicks link → opens form (no login)
+3. Vendor fills quotation + uploads docs
+4. System validates & stores in Vendor Service
+5. Confirmation email sent to vendor
+```
+
+**OPTION 3: API-Only (For Large Vendors)**
+
+```
+Enterprise vendors integrate via REST API:
+- API key authentication
+- Webhook notifications for new RFQs
+- Automated quotation submission
+- EDI/XML format support
+```
+
+### 14.2 Vendor Portal API Endpoints
+
+```typescript
+// PUBLIC ENDPOINTS (Token-based, no login)
+GET  /api/v1/public/rfq/:token          // View RFQ details
+POST /api/v1/public/rfq/:token/quote    // Submit quotation
+POST /api/v1/public/rfq/:token/upload   // Upload documents
+
+// AUTHENTICATED VENDOR ENDPOINTS (Requires Keycloak JWT with VENDOR role)
+GET  /api/v1/vendor/rfqs                // List all RFQs for vendor
+GET  /api/v1/vendor/rfqs/:id            // Get RFQ details
+POST /api/v1/vendor/quotations          // Submit quotation
+GET  /api/v1/vendor/quotations          // View my quotations
+GET  /api/v1/vendor/orders              // View awarded purchase orders
+POST /api/v1/vendor/invoices            // Submit invoice
+GET  /api/v1/vendor/invoices            // View my invoices
+GET  /api/v1/vendor/payments            // View payment history
+PUT  /api/v1/vendor/profile             // Update vendor profile
+```
+
+---
+
+## 15. File Storage Architecture
+
+### 15.1 File Storage Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FILE STORAGE ARCHITECTURE                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   LOCAL DEVELOPMENT: MinIO                                                   │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                                                                      │  │
+│   │   docker-compose.yml:                                                │  │
+│   │     minio:                                                           │  │
+│   │       image: minio/minio:latest                                      │  │
+│   │       ports: ["9000:9000", "9001:9001"]                              │  │
+│   │       environment:                                                   │  │
+│   │         MINIO_ROOT_USER: minioadmin                                  │  │
+│   │         MINIO_ROOT_PASSWORD: minioadmin                              │  │
+│   │       command: server /data --console-address ":9001"                │  │
+│   │                                                                      │  │
+│   │   Web UI: http://localhost:9001                                      │  │
+│   │   API: http://localhost:9000                                         │  │
+│   │                                                                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   PRODUCTION: AWS S3 / Azure Blob Storage                                   │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                                                                      │  │
+│   │   • S3-compatible API for easy migration                             │  │
+│   │   • Lifecycle policies for archiving                                 │  │
+│   │   • Server-side encryption (SSE-KMS)                                 │  │
+│   │   • CloudFront CDN for fast downloads                                │  │
+│   │   • IAM roles for service access                                     │  │
+│   │                                                                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.2 Bucket Structure
+
+```
+procurement-files/
+├── attachments/
+│   ├── requests/
+│   │   └── {request_id}/
+│   │       ├── specifications.pdf
+│   │       ├── technical-drawing.dwg
+│   │       └── reference-image.jpg
+│   │
+│   ├── quotations/
+│   │   └── {quotation_id}/
+│   │       ├── vendor-quote.pdf
+│   │       └── supporting-docs.xlsx
+│   │
+│   ├── invoices/
+│   │   └── {invoice_id}/
+│   │       ├── invoice-{number}.pdf
+│   │       └── delivery-note.pdf
+│   │
+│   └── purchase-orders/
+│       └── {po_id}/
+│           ├── po-signed.pdf
+│           └── terms-and-conditions.pdf
+│
+├── templates/                     # System templates
+│   ├── email-templates/
+│   └── document-templates/
+│
+└── exports/                       # Report exports
+    └── audit-reports/
+```
+
+### 15.3 File Upload Flow
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         FILE UPLOAD WORKFLOW                                 │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   CLIENT                  API SERVICE              FILE STORAGE              │
+│     │                        │                         │                     │
+│     │  1. Request upload     │                         │                     │
+│     ├───────────────────────►│                         │                     │
+│     │                        │                         │                     │
+│     │                   2. Generate presigned URL      │                     │
+│     │                        ├────────────────────────►│                     │
+│     │                        │                         │                     │
+│     │  3. Return URL         │◄────────────────────────┤                     │
+│     │◄───────────────────────┤                         │                     │
+│     │                        │                         │                     │
+│     │  4. Upload directly    │                         │                     │
+│     ├──────────────────────────────────────────────────►                     │
+│     │                        │                         │                     │
+│     │  5. Confirm upload     │                         │                     │
+│     ├───────────────────────►│                         │                     │
+│     │                        │                         │                     │
+│     │                   6. Save metadata to DB         │                     │
+│     │                        │                         │                     │
+│     │  7. Success response   │                         │                     │
+│     │◄───────────────────────┤                         │                     │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 15.4 File Service Implementation
+
+```typescript
+// file-storage.service.ts (Shared library)
+
+import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
+export class FileStorageService {
+  private s3Client: S3Client;
+  private bucketName: string;
+
+  constructor() {
+    this.s3Client = new S3Client({
+      endpoint: process.env.S3_ENDPOINT, // MinIO or AWS
+      region: process.env.S3_REGION || 'us-east-1',
+      credentials: {
+        accessKeyId: process.env.S3_ACCESS_KEY,
+        secretAccessKey: process.env.S3_SECRET_KEY,
+      },
+      forcePathStyle: true, // Required for MinIO
+    });
+    this.bucketName = process.env.S3_BUCKET_NAME;
+  }
+
+  async getUploadUrl(key: string, contentType: string): Promise<string> {
+    const command = new PutObjectCommand({
+      Bucket: this.bucketName,
+      Key: key,
+      ContentType: contentType,
+    });
+    return getSignedUrl(this.s3Client, command, { expiresIn: 3600 }); // 1 hour
+  }
+
+  async getDownloadUrl(key: string): Promise<string> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucketName,
+      Key: key,
+    });
+    return getSignedUrl(this.s3Client, command, { expiresIn: 3600 });
+  }
+
+  generateKey(type: string, id: string, filename: string): string {
+    const sanitized = filename.replace(/[^a-zA-Z0-9.-]/g, '_');
+    return `attachments/${type}/${id}/${Date.now()}-${sanitized}`;
+  }
+}
+```
+
+### 15.5 Database Schema for File Metadata
+
+```sql
+CREATE TABLE file_attachments (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  entity_type VARCHAR(50) NOT NULL, -- 'request', 'quotation', 'invoice', 'po'
+  entity_id UUID NOT NULL,
+  file_name VARCHAR(255) NOT NULL,
+  file_size BIGINT NOT NULL,
+  content_type VARCHAR(100) NOT NULL,
+  storage_key VARCHAR(500) NOT NULL, -- S3 key
+  uploaded_by UUID NOT NULL,
+  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  is_deleted BOOLEAN DEFAULT FALSE,
+  deleted_at TIMESTAMP,
+  deleted_by UUID
+);
+
+CREATE INDEX idx_file_entity ON file_attachments(entity_type, entity_id);
+CREATE INDEX idx_file_uploaded_by ON file_attachments(uploaded_by);
+```
+
+---
+
+## 16. Observability & Monitoring Dashboards
+
+### 16.1 Grafana Dashboard Examples
+
+**Dashboard 1: Budget Utilization Overview**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                      BUDGET UTILIZATION DASHBOARD                            │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   ┌────────────────────────┐  ┌────────────────────────┐                    │
+│   │  Total Budget: $2.5M   │  │  Spent: $1.2M (48%)    │                    │
+│   └────────────────────────┘  └────────────────────────┘                    │
+│                                                                              │
+│   ┌────────────────────────┐  ┌────────────────────────┐                    │
+│   │  Reserved: $400K (16%) │  │  Available: $900K (36%)│                    │
+│   └────────────────────────┘  └────────────────────────┘                    │
+│                                                                              │
+│   Department Budget Utilization:                                            │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                                                                      │  │
+│   │   IT          ████████████████░░░░  75% ($750K/$1M)                 │  │
+│   │   Finance     ██████████░░░░░░░░░░  50% ($250K/$500K)               │  │
+│   │   HR          ████████░░░░░░░░░░░░  40% ($100K/$250K)               │  │
+│   │   Operations  ████████████████████  95% ($475K/$500K) ⚠️            │  │
+│   │                                                                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Budget Trend (Last 6 Months):                                             │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │ $2.5M │                                                .--.          │  │
+│   │       │                                        .--.  .'    '.        │  │
+│   │ $2.0M │                              .--.    .'    .'        '.      │  │
+│   │       │                    .--.    .'    '..'                  '.    │  │
+│   │ $1.5M │          .--.    .'    '..'                              `.  │  │
+│   │       │        .'    '..'                                           │  │
+│   │ $1.0M └────────────────────────────────────────────────────────────► │  │
+│   │         Jan   Feb   Mar   Apr   May   Jun                           │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Dashboard 2: Request Processing Metrics**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    REQUEST PROCESSING DASHBOARD                              │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Approval Queue:                                                            │
+│   ┌────────────────────────┐  ┌────────────────────────┐                    │
+│   │  Pending: 23 requests  │  │  Avg Wait: 2.5 hours   │                    │
+│   └────────────────────────┘  └────────────────────────┘                    │
+│                                                                              │
+│   Request Status Distribution:                                               │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │                                                                      │  │
+│   │   Pending Approval    ███████░░░░░░░░░  35% (23)                    │  │
+│   │   In RFQ              ██████░░░░░░░░░░  30% (20)                    │  │
+│   │   Approved            ████░░░░░░░░░░░░  20% (13)                    │  │
+│   │   Rejected            ██░░░░░░░░░░░░░░  10% (7)                     │  │
+│   │   Completed           █░░░░░░░░░░░░░░░   5% (3)                     │  │
+│   │                                                                      │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Processing Time (P50/P95/P99):                                            │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  Request Creation → Approval:  2h / 6h / 12h                         │  │
+│   │  Approval → RFQ Sent:          30m / 1h / 2h                         │  │
+│   │  RFQ → Quotation Received:     3d / 5d / 7d                          │  │
+│   │  Quotation → PO Issued:        1h / 3h / 6h                          │  │
+│   │  PO → Delivery:                7d / 14d / 21d                        │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Request Rate (Last 24 hours):                                             │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  30 │                       ●                                        │  │
+│   │     │                   ●       ●                                    │  │
+│   │  20 │               ●               ●       ●                        │  │
+│   │     │           ●                               ●                    │  │
+│   │  10 │       ●                                       ●       ●        │  │
+│   │     │   ●                                                       ●    │  │
+│   │   0 └─────────────────────────────────────────────────────────────► │  │
+│   │      00:00  04:00  08:00  12:00  16:00  20:00  24:00               │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**Dashboard 3: System Health & Performance**
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                       SYSTEM HEALTH DASHBOARD                                │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│   Service Status:                                                            │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  ✅ User Service          (2/2 pods healthy)   Latency: 45ms        │  │
+│   │  ✅ Budget Service        (3/3 pods healthy)   Latency: 120ms       │  │
+│   │  ✅ Requisition Service   (3/3 pods healthy)   Latency: 200ms       │  │
+│   │  ✅ Vendor Service        (2/2 pods healthy)   Latency: 80ms        │  │
+│   │  ✅ Order Service         (2/2 pods healthy)   Latency: 150ms       │  │
+│   │  ✅ Notification Worker   (1/1 pod healthy)    Latency: 30ms        │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   API Error Rate (Last Hour):                                               │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  5% │                                                                │  │
+│   │     │                                                                │  │
+│   │  3% │                                                      ●         │  │
+│   │     │                                              ●                 │  │
+│   │  1% │   ●   ●   ●       ●       ●   ●   ●   ●                       │  │
+│   │     │                                                                │  │
+│   │  0% └─────────────────────────────────────────────────────────────► │  │
+│   │      :00  :10  :20  :30  :40  :50  :60                             │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Database Connections:                                                      │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  User DB:          12/100 (12% used)                                 │  │
+│   │  Budget DB:        45/100 (45% used)                                 │  │
+│   │  Requisition DB:   67/100 (67% used)                                 │  │
+│   │  Vendor DB:        23/100 (23% used)                                 │  │
+│   │  Order DB:         34/100 (34% used)                                 │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+│   Kafka Consumer Lag:                                                        │
+│   ┌──────────────────────────────────────────────────────────────────────┐  │
+│   │  audit-consumer:          0 messages (✅ caught up)                  │  │
+│   │  notification-consumer:   3 messages (✅ healthy)                    │  │
+│   │  analytics-consumer:      127 messages (⚠️ lagging)                 │  │
+│   └──────────────────────────────────────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### 16.2 Prometheus Metrics to Collect
+
+```yaml
+# Example metrics configuration
+
+# Application Metrics
+- procurement_request_created_total
+- procurement_request_approved_total
+- procurement_request_rejected_total
+- procurement_budget_check_duration_seconds
+- procurement_budget_available_amount
+- procurement_budget_reserved_amount
+- procurement_budget_spent_amount
+
+# Service Metrics
+- http_request_duration_seconds{service="budget-service", endpoint="/api/v1/budgets/check"}
+- http_requests_total{service="requisition-service", status="200|400|500"}
+- kafka_consumer_lag{consumer_group="notification-worker", topic="procurement.notifications"}
+- database_connection_pool_size{service="budget-service", state="active|idle"}
+
+# Infrastructure Metrics
+- kubernetes_pod_status{namespace="procurement-dev", pod="budget-service-*"}
+- kafka_broker_status
+- postgresql_connections_active
+- redis_connected_clients
+```
+
+### 16.3 Alert Rules
+
+```yaml
+# alerts.yml
+
+groups:
+  - name: procurement_alerts
+    interval: 30s
+    rules:
+      - alert: HighApprovalQueueDepth
+        expr: procurement_pending_approvals > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of pending approvals"
+          description: "{{ $value }} requests waiting for approval"
+
+      - alert: BudgetServiceDown
+        expr: up{job="budget-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Budget service is down"
+
+      - alert: HighErrorRate
+        expr: rate(http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+
+      - alert: KafkaConsumerLag
+        expr: kafka_consumer_lag > 1000
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka consumer is lagging"
+```
+
+---
+
+## 17. Key Design Decisions (Updated)
 
 | Decision | Rationale |
 |----------|-----------|
-| **5 services instead of 8** | Simpler to develop, deploy, and maintain |
+| **6 services + file storage** | Added Notification Worker as dedicated service, File Storage as infrastructure |
 | **User Service separate from Keycloak** | Keycloak = auth, User Service = business data (org, approvals) |
 | **Request + Approval merged** | Tightly coupled; always used together |
 | **Order + Invoice + Payment merged** | Same lifecycle; reduces inter-service calls |
 | **Audit via events, not service** | No dedicated service; Kafka → Elasticsearch |
-| **Notifications embedded** | Simple email sending, not a separate service |
+| **Dedicated Notification Worker** | Kafka consumer for reliable email delivery, template management |
+| **Vendor Portal with magic links** | Simplifies vendor onboarding, no forced registration for one-time quotes |
+| **MinIO for local, S3 for prod** | S3-compatible API enables seamless migration |
+| **Presigned URLs for uploads** | Direct client-to-storage upload, reduces API server load |
 
 ---
 
-## 15. Next Steps (Recommended)
+## 18. Next Steps (Recommended)
 
 1. **Review & validate** this architecture with stakeholders
 2. **Prioritize MVP scope** - Which services are must-have for first release?
+3. **Setup initial repositories** - Decide monorepo vs multi-repo
+4. **Create Docker Compose** - Local development environment (with MinIO added)
+5. **Scaffold first 3 services** - Budget + Purchase Request + Notification Worker
+6. **Implement CI pipeline** - GitLab CI with basic stages
+7. **Setup vendor portal** - Basic React app for quotation submission
+8. **Configure Grafana dashboards** - Import templates for monitoring
+
+---
+
+*Document Version: 2.0*  
+*Created: January 24, 2026*  
+*Updated: January 31, 2026 - Added Notification Worker, File Storage, Vendor Portal, and Observability*  
+*Author: Architecture Team*
 3. **Setup initial repositories** - Decide monorepo vs multi-repo
 4. **Create Docker Compose** - Local development environment
 5. **Scaffold first 2 services** - Budget + Purchase Request

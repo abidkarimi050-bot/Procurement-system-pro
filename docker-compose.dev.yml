@@ -1,0 +1,233 @@
+# Development Docker Compose - Arch Folder Services
+# Run: docker-compose -f docker-compose.dev.yml up -d
+
+networks:
+  procurement-net:
+    driver: bridge
+
+services:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # INFRASTRUCTURE
+  # ═══════════════════════════════════════════════════════════════════════════
+  
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: arch-postgres
+    environment:
+      POSTGRES_USER: procurement
+      POSTGRES_PASSWORD: secure_password_123
+      POSTGRES_DB: procurement
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-databases.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U procurement"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: arch-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Zookeeper for Kafka
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: arch-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # Kafka Event Streaming
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: arch-kafka
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  # ═══════════════════════════════════════════════════════════════════════════
+  # MICROSERVICES - PHASE 1
+  # ═══════════════════════════════════════════════════════════════════════════
+
+  # User Service (NestJS) - Port 3002
+  user-service:
+    build:
+      context: ./services/user-service
+      dockerfile: Dockerfile.dev
+    container_name: arch-user-service
+    ports:
+      - "3002:3002"
+    environment:
+      NODE_ENV: development
+      PORT: 3002
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: user_service
+      DATABASE_USER: procurement
+      DATABASE_PASSWORD: secure_password_123
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CLIENT_ID: user-service
+      KAFKA_GROUP_ID: user-service-group
+    volumes:
+      - ./services/user-service/src:/app/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3002/api/v1/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    restart: unless-stopped
+
+  # Budget Service (Spring Boot) - Port 8001
+  budget-service:
+    build:
+      context: ./services/budget-service
+      dockerfile: Dockerfile.dev
+    container_name: arch-budget-service
+    ports:
+      - "8001:8080"
+    environment:
+      DATABASE_HOST: postgres
+      DATABASE_PORT: 5432
+      DATABASE_NAME: budget_service
+      DATABASE_USER: procurement
+      DATABASE_PASSWORD: secure_password_123
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CLIENT_ID: budget-service
+      KAFKA_GROUP_ID: budget-service-group
+      PORT: 8080
+      LOG_LEVEL: DEBUG
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/api/v1/budgets/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # API Gateway (NestJS) - Port 3000
+  api-gateway:
+    build:
+      context: ./services/api-gateway
+      dockerfile: Dockerfile.dev
+    container_name: arch-api-gateway
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_CLIENT_ID: api-gateway
+      KAFKA_GROUP_ID: api-gateway-group
+      CORS_ORIGIN: http://localhost:3100
+      USER_SERVICE_URL: http://user-service:3002
+      BUDGET_SERVICE_URL: http://budget-service:8080
+    volumes:
+      - ./services/api-gateway/src:/app/src
+    depends_on:
+      kafka:
+        condition: service_healthy
+      user-service:
+        condition: service_healthy
+      budget-service:
+        condition: service_healthy
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/v1/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    restart: unless-stopped
+
+  # Frontend (React + Vite) - Port 3100
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: arch-frontend
+    ports:
+      - "3100:5173"
+    environment:
+      VITE_API_URL: http://localhost:3000/api/v1
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/index.html:/app/index.html
+      - ./frontend/vite.config.ts:/app/vite.config.ts
+    depends_on:
+      - api-gateway
+    networks:
+      - procurement-net
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:5173"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
